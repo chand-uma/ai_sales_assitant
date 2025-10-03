@@ -4,7 +4,7 @@ A secure, AI-powered digital assistant deployed via Microsoft Teams that integra
 
 ## Architecture Overview
 
-The RIA system follows a comprehensive Azure-centric architecture with the following key components:
+The SIA system follows a comprehensive Azure-centric architecture with the following key components:
 
 - **Data Ingestion**: SAP ECC/BW → SFTP → Azure Data Factory → ADLS/SQL Database
 - **AI Processing**: Azure ML Studio, AI Search, OpenAI Models
@@ -14,7 +14,7 @@ The RIA system follows a comprehensive Azure-centric architecture with the follo
 ## Project Structure
 
 ```
-voltagrid/
+sia/
 ├── infrastructure/          # Azure infrastructure as code
 ├── data-pipeline/          # Data Factory and processing
 ├── ml-models/             # Azure ML Studio notebooks and models
