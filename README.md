@@ -1,4 +1,4 @@
-# RIA (Riddell Information Assistant)
+# SIA (sales Information Assistant)
 
 A secure, AI-powered digital assistant deployed via Microsoft Teams that integrates SAP data to provide intelligent business insights.
 
