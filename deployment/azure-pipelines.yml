@@ -1,0 +1,306 @@
+# Azure DevOps Pipeline for RIA System
+# This pipeline builds, tests, and deploys the RIA system
+
+trigger:
+  branches:
+    include:
+    - main
+    - develop
+  paths:
+    exclude:
+    - README.md
+    - docs/*
+
+pr:
+  branches:
+    include:
+    - main
+    - develop
+
+variables:
+  buildConfiguration: 'Release'
+  azureSubscription: 'RIA-Azure-Subscription'
+  resourceGroupName: 'rg-ria-$(environment)'
+  location: 'East US'
+
+stages:
+- stage: Build
+  displayName: 'Build and Test'
+  jobs:
+  - job: BuildJob
+    displayName: 'Build All Components'
+    pool:
+      vmImage: 'ubuntu-latest'
+    
+    steps:
+    - task: NodeTool@0
+      displayName: 'Install Node.js'
+      inputs:
+        versionSpec: '18.x'
+    
+    - task: UsePythonVersion@0
+      displayName: 'Install Python'
+      inputs:
+        versionSpec: '3.9'
+    
+    - task: AzureCLI@2
+      displayName: 'Install Azure CLI'
+      inputs:
+        azureSubscription: $(azureSubscription)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az --version
+          az extension add --name azure-devops
+    
+    - task: PowerShell@2
+      displayName: 'Install Azure Functions Core Tools'
+      inputs:
+        targetType: 'inline'
+        script: |
+          npm install -g azure-functions-core-tools@4 --unsafe-perm true
+          func --version
+    
+    - task: DotNetCoreCLI@2
+      displayName: 'Install .NET Core SDK'
+      inputs:
+        command: 'custom'
+        custom: 'tool'
+        arguments: 'install --global dotnet-ef'
+    
+    - script: |
+        echo "Building Bot Service..."
+        cd bot-service
+        npm ci
+        npm run build
+        npm run test
+      displayName: 'Build Bot Service'
+    
+    - script: |
+        echo "Building API Services..."
+        cd api-services/data-processing
+        pip install -r requirements.txt
+        python -m pytest tests/ -v
+      displayName: 'Build Data Processing Functions'
+    
+    - script: |
+        echo "Building API Services..."
+        cd api-services/api-services
+        npm ci
+        npm run build
+        npm run test
+      displayName: 'Build API Services Functions'
+    
+    - task: PublishTestResults@2
+      displayName: 'Publish Test Results'
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: '**/test-results.xml'
+        failTaskOnFailedTests: true
+    
+    - task: PublishCodeCoverageResults@1
+      displayName: 'Publish Code Coverage'
+      inputs:
+        codeCoverageTool: 'Cobertura'
+        summaryFileLocation: '**/coverage.xml'
+        failIfCoverageEmpty: true
+
+- stage: DeployInfrastructure
+  displayName: 'Deploy Infrastructure'
+  dependsOn: Build
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - deployment: DeployInfraJob
+    displayName: 'Deploy Azure Infrastructure'
+    environment: 'Production'
+    pool:
+      vmImage: 'ubuntu-latest'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureCLI@2
+            displayName: 'Deploy Infrastructure'
+            inputs:
+              azureSubscription: $(azureSubscription)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                chmod +x deployment/deploy-infrastructure.ps1
+                pwsh -File deployment/deploy-infrastructure.ps1 -ResourceGroupName $(resourceGroupName) -Location $(location) -Environment $(environment)
+    
+    variables:
+      environment: 'prod'
+
+- stage: DeployBot
+  displayName: 'Deploy Bot Service'
+  dependsOn: DeployInfrastructure
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - deployment: DeployBotJob
+    displayName: 'Deploy Teams Bot'
+    environment: 'Production'
+    pool:
+      vmImage: 'ubuntu-latest'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureCLI@2
+            displayName: 'Deploy Bot Service'
+            inputs:
+              azureSubscription: $(azureSubscription)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                chmod +x deployment/deploy-bot.ps1
+                pwsh -File deployment/deploy-bot.ps1 -ResourceGroupName $(resourceGroupName) -Environment $(environment)
+    
+    variables:
+      environment: 'prod'
+
+- stage: DeployFunctions
+  displayName: 'Deploy Azure Functions'
+  dependsOn: DeployInfrastructure
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - deployment: DeployFunctionsJob
+    displayName: 'Deploy Data Processing Functions'
+    environment: 'Production'
+    pool:
+      vmImage: 'ubuntu-latest'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureCLI@2
+            displayName: 'Deploy Functions'
+            inputs:
+              azureSubscription: $(azureSubscription)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                chmod +x deployment/deploy-functions.ps1
+                pwsh -File deployment/deploy-functions.ps1 -ResourceGroupName $(resourceGroupName) -Environment $(environment)
+    
+    variables:
+      environment: 'prod'
+
+- stage: DeployDataFactory
+  displayName: 'Deploy Data Factory Pipelines'
+  dependsOn: DeployInfrastructure
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - deployment: DeployDataFactoryJob
+    displayName: 'Deploy Data Factory'
+    environment: 'Production'
+    pool:
+      vmImage: 'ubuntu-latest'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureCLI@2
+            displayName: 'Deploy Data Factory Pipelines'
+            inputs:
+              azureSubscription: $(azureSubscription)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "Deploying Data Factory pipelines..."
+                # Import Data Factory pipelines
+                az datafactory pipeline create --resource-group $(resourceGroupName) --factory-name "ria-prod-datafactory" --name "SapDataIngestionPipeline" --pipeline "data-pipeline/sap-data-ingestion.json"
+    
+    variables:
+      environment: 'prod'
+
+- stage: PostDeployment
+  displayName: 'Post-Deployment Validation'
+  dependsOn: [DeployBot, DeployFunctions, DeployDataFactory]
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - job: ValidationJob
+    displayName: 'Validate Deployment'
+    pool:
+      vmImage: 'ubuntu-latest'
+    
+    steps:
+    - task: AzureCLI@2
+      displayName: 'Health Check Bot Service'
+      inputs:
+        azureSubscription: $(azureSubscription)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          echo "Checking bot service health..."
+          botUrl=$(az webapp show --resource-group $(resourceGroupName) --name "ria-prod-bot" --query "defaultHostName" --output tsv)
+          curl -f "https://$botUrl/health" || exit 1
+    
+    - task: AzureCLI@2
+      displayName: 'Health Check Functions'
+      inputs:
+        azureSubscription: $(azureSubscription)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          echo "Checking functions health..."
+          funcUrl=$(az functionapp show --resource-group $(resourceGroupName) --name "ria-prod-data-processing" --query "defaultHostName" --output tsv)
+          curl -f "https://$funcUrl/api/health" || exit 1
+    
+    - task: AzureCLI@2
+      displayName: 'Test Data Pipeline'
+      inputs:
+        azureSubscription: $(azureSubscription)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          echo "Testing data pipeline..."
+          # Trigger a test run of the data pipeline
+          az datafactory pipeline create-run --resource-group $(resourceGroupName) --factory-name "ria-prod-datafactory" --name "SapDataIngestionPipeline"
+    
+    - task: AzureCLI@2
+      displayName: 'Send Deployment Notification'
+      inputs:
+        azureSubscription: $(azureSubscription)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          echo "Sending deployment notification..."
+          # Send notification to Teams channel
+          curl -H "Content-Type: application/json" -d '{"text":"RIA system deployment completed successfully!"}' "$(TEAMS_WEBHOOK_URL)"
+    
+    variables:
+      environment: 'prod'
+
+- stage: Rollback
+  displayName: 'Rollback on Failure'
+  dependsOn: [DeployInfrastructure, DeployBot, DeployFunctions, DeployDataFactory]
+  condition: failed()
+  jobs:
+  - job: RollbackJob
+    displayName: 'Rollback Deployment'
+    pool:
+      vmImage: 'ubuntu-latest'
+    
+    steps:
+    - task: AzureCLI@2
+      displayName: 'Rollback Infrastructure'
+      inputs:
+        azureSubscription: $(azureSubscription)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          echo "Rolling back deployment..."
+          # Delete the resource group to rollback
+          az group delete --name $(resourceGroupName) --yes --no-wait
+    
+    - task: AzureCLI@2
+      displayName: 'Send Rollback Notification'
+      inputs:
+        azureSubscription: $(azureSubscription)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          echo "Sending rollback notification..."
+          # Send notification to Teams channel
+          curl -H "Content-Type: application/json" -d '{"text":"RIA system deployment failed and has been rolled back!"}' "$(TEAMS_WEBHOOK_URL)"
